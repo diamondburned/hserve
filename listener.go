@@ -2,6 +2,7 @@ package listener
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -125,7 +126,20 @@ func (l listener) Close() error {
 func cleanup(scheme, addr string) error {
 	switch scheme {
 	case "unix", "unixpacket":
-		os.RemoveAll(addr)
+		// Try and Lstat the socket file. If it doesn't exist, then don't
+		// bother.
+		s, err := os.Lstat(addr)
+		if err != nil {
+			return nil
+		}
+
+		// Check if the file is a socket file. Only remove it if it is.
+		if s.Mode()&os.ModeSocket != 0 {
+			return os.Remove(addr)
+		}
+
+		// Error out if it's not.
+		return fmt.Errorf("file %q is not a Unix socket", addr)
 	}
 
 	return nil
