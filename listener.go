@@ -3,6 +3,7 @@ package listener
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,6 +21,13 @@ var DefaultListenConfig = &net.ListenConfig{}
 // HTTPShutdownTimeout is the timeout to wait when shutting down HTTP.
 var HTTPShutdownTimeout = 5 * time.Second
 
+// MustHTTPListenAndServe is HTTPListenAndServe that log.Fatals on an error.
+func MustHTTPListenAndServe(address string, handler http.Handler) {
+	if err := HTTPListenAndServe(address, handler); err != nil {
+		log.Fatalln("cannot listen and serve HTTP:", err)
+	}
+}
+
 // HTTPListenAndServe listens and serves HTTP until a SIGINT is received.
 func HTTPListenAndServe(address string, handler http.Handler) error {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -34,6 +42,13 @@ func HTTPListenAndServe(address string, handler http.Handler) error {
 	}()
 
 	return HTTPListenAndServeCtx(ctx, &http.Server{Addr: address, Handler: handler})
+}
+
+// MustHTTPListenAndServeCtx is HTTPListenAndServeCtx that log.Fatals on an error.
+func MustHTTPListenAndServeCtx(ctx context.Context, server *http.Server) {
+	if err := HTTPListenAndServeCtx(ctx, server); err != nil {
+		log.Fatalln("cannot listen and serve HTTP:", err)
+	}
 }
 
 // HTTPListenAndServeCtx listens to the address set in http.Server and serves
