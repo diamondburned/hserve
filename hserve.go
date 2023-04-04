@@ -1,4 +1,4 @@
-package listener
+package hserve
 
 import (
 	"context"
@@ -11,59 +11,48 @@ import (
 	"os/signal"
 	"strings"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 // DefaultListenConfig is the default ListenConfig used for Listen().
 var DefaultListenConfig = &net.ListenConfig{}
 
-// HTTPShutdownTimeout is the timeout to wait when shutting down HTTP.
-var HTTPShutdownTimeout = 5 * time.Second
+// ShutdownTimeout is the timeout to wait when shutting down HTTP.
+var ShutdownTimeout = 10 * time.Second
 
-// MustHTTPListenAndServe is HTTPListenAndServe that log.Fatals on an error.
-func MustHTTPListenAndServe(address string, handler http.Handler) {
-	if err := HTTPListenAndServe(address, handler); err != nil {
+// MustListenAndServe does ListenAndServe and log.Fatals on an error.
+func MustListenAndServe(ctx context.Context, address string, handler http.Handler) {
+	if err := ListenAndServe(ctx, address, handler); err != nil {
 		log.Fatalln("cannot listen and serve HTTP:", err)
 	}
 }
 
-// HTTPListenAndServe listens and serves HTTP until a SIGINT is received.
-func HTTPListenAndServe(address string, handler http.Handler) error {
-	ctx, cancel := context.WithCancel(context.Background())
+// ListenAndServe listens and serves HTTP until a SIGINT is received.
+func ListenAndServe(ctx context.Context, address string, handler http.Handler) error {
+	return ListenAndServeExisting(ctx, &http.Server{Addr: address, Handler: handler})
+}
+
+// MustListenAndServeExisting does ListenAndServeExisting and log.Fatals on an
+// error.
+func MustListenAndServeExisting(ctx context.Context, server *http.Server) {
+	if err := ListenAndServeExisting(ctx, server); err != nil {
+		log.Fatalln("cannot listen and serve HTTP:", err)
+	}
+}
+
+// ListenAndServeExisting listens to the address set in http.Server and serves
+// HTTP. It gracefully exits if the given ctx expires.
+func ListenAndServeExisting(ctx context.Context, server *http.Server) error {
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
 
-	go func() {
-		sigint := make(chan os.Signal, 1)
-		signal.Notify(sigint, os.Interrupt)
-		<-sigint
-
-		cancel()
-	}()
-
-	return HTTPListenAndServeCtx(ctx, &http.Server{Addr: address, Handler: handler})
-}
-
-// MustHTTPListenAndServeCtx is HTTPListenAndServeCtx that log.Fatals on an error.
-func MustHTTPListenAndServeCtx(ctx context.Context, server *http.Server) {
-	if err := HTTPListenAndServeCtx(ctx, server); err != nil {
-		log.Fatalln("cannot listen and serve HTTP:", err)
-	}
-}
-
-// HTTPListenAndServeCtx listens to the address set in http.Server and serves
-// HTTP. It gracefully exits if the given ctx expires.
-func HTTPListenAndServeCtx(ctx context.Context, server *http.Server) error {
-	l, err := Listen(server.Addr)
+	l, err := Listen(ctx, server.Addr)
 	if err != nil {
 		return err
 	}
 	defer l.Close()
 
-	var serveErr = make(chan error, 1)
-	go func() {
-		serveErr <- server.Serve(l)
-	}()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(l) }()
 
 	select {
 	case <-ctx.Done():
@@ -74,19 +63,19 @@ func HTTPListenAndServeCtx(ctx context.Context, server *http.Server) error {
 		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), HTTPShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(ctx, ShutdownTimeout)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		return errors.Wrap(err, "failed to shutdown gracefully")
+		return fmt.Errorf("failed to shutdown gracefully: %w", err)
 	}
 
 	return err
 }
 
 // Listen calls ListenWithConfig with the DefaultListenConfig.
-func Listen(address string) (net.Listener, error) {
-	return ListenWithConfig(DefaultListenConfig, address)
+func Listen(ctx context.Context, address string) (net.Listener, error) {
+	return ListenWithConfig(ctx, address, DefaultListenConfig)
 }
 
 // ListenWithConfig listens for incoming connections using the given address
@@ -97,14 +86,15 @@ func Listen(address string) (net.Listener, error) {
 //    tcp4://127.0.0.1:29485
 //    unix:///tmp/path/to/socket.sock (will be automatically cleaned up)
 //    unixpacket:///tmp/path/to/socket.sock (same as unix)
-func ListenWithConfig(config *net.ListenConfig, address string) (net.Listener, error) {
+//
+func ListenWithConfig(ctx context.Context, address string, config *net.ListenConfig) (net.Listener, error) {
 	if !strings.Contains(address, "://") {
 		address = "tcp://" + address
 	}
 
 	listenURL, err := url.Parse(address)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse address")
+		return nil, fmt.Errorf("failed to parse address: %w", err)
 	}
 
 	var (
@@ -114,12 +104,12 @@ func ListenWithConfig(config *net.ListenConfig, address string) (net.Listener, e
 
 	// Do cleanup just in case.
 	if err := cleanup(scheme, addr); err != nil {
-		return nil, errors.Wrap(err, "failed to run cleanup prior to listening")
+		return nil, fmt.Errorf("failed to run cleanup prior to listening: %w", err)
 	}
 
-	l, err := config.Listen(context.Background(), scheme, addr)
+	l, err := config.Listen(ctx, scheme, addr)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to listen at %v", listenURL)
+		return nil, fmt.Errorf("failed to listen at %v: %w", listenURL, err)
 	}
 
 	return listener{l, scheme, addr}, nil
@@ -135,6 +125,12 @@ type listener struct {
 func (l listener) Close() error {
 	defer cleanup(l.scheme, l.addr)
 	return l.Listener.Close()
+}
+
+// Unwrap is here just in case the user needs it. They'll need to assert it to
+// their own `interface { Unwrap() net.Listener }`, but it's there.
+func (l listener) Unwrap() net.Listener {
+	return l.Listener
 }
 
 // cleanup detects the scheme to do appropriate clean up operations.
